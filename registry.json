@@ -6,7 +6,12 @@
     {
       "version": "1.0.1",
       "tag": "xgit-v1.0.1",
-      "files": []
+      "files": [
+        {
+          "name": "xgit.nx.pkg.1.0.1.universal.tar.xz",
+          "sha256": "4f574e0bb07197000525cff4a3d56f879367658e49034a82b7433caec5663f9b"
+        }
+      ]
     }
   ]
 }
