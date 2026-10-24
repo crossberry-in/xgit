@@ -1,9 +1,10 @@
 {
-  "name": "a",
-  "version": "1.0.0",
+  "name": "xgit",
+  "version": "1.0.1",
   "private": true,
+  "description": "GitHub full-access helper: create/rename repos, push, raw REST API via curl",
   "bin": {
-    "a": "src/main.js"
+    "xgit": "src/main.js"
   },
   "scripts": {
     "start": "node src/main.js"
