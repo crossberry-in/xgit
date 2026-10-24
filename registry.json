@@ -1,7 +1,7 @@
 {
   "name": "xgit",
   "description": "Noxs xgit — GitHub full-access helper (create/rename/push + REST API via curl)",
-  "latest": "1.0.1",
+  "latest": "1.0.2",
   "versions": [
     {
       "version": "1.0.1",
@@ -12,6 +12,11 @@
           "sha256": "4f574e0bb07197000525cff4a3d56f879367658e49034a82b7433caec5663f9b"
         }
       ]
+    },
+    {
+      "version": "1.0.2",
+      "tag": "xgit-v1.0.2",
+      "files": []
     }
   ]
 }

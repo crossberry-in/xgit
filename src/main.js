@@ -6,22 +6,47 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const VERSION = '1.0.1';
+const VERSION = '1.0.2';
 const API = 'https://api.github.com';
 
 function usage() {
     return [
         'Usage: xgit <command> [options]',
         '',
-        'GitHub full-access helper: create, rename, push and raw REST API via curl.',
+        'GitHub full-access helper: git commands and raw REST API via curl.',
         '',
         'Commands:',
         '  token                              Verify the stored GitHub token (gh auth / GH_TOKEN)',
         '  status                             Token + current repo/remote status',
+        '  init [dir] [options]               git init; optionally attach a GitHub origin',
+        '  add [paths...]                     git add (default: everything)',
+        '  commit [git-commit-options...]     git commit with automatic identity fallback',
+        '  clone <repo> [dir] [options]       git clone; owner/repo shorthand supported',
+        '  push [git-push-options...]         Thin authenticated wrapper around git push',
+        '  read <path> [ref] [options]        Read a file (or list a dir) from GitHub',
+        '  workflow <sub> [args]              List, read or follow GitHub Actions',
         '  create <name> [options]            Create a GitHub repo; scaffold a Noxs package',
         '  rename <new-name>                  Rename origin repo and fix the local remote',
-        '  push [git-push-options...]         Thin authenticated wrapper around git push',
         '  api [METHOD] <path> [-d <json>]    Raw GitHub REST call (curl), HTTP status on stderr',
+        '',
+        'init options:',
+        '  --remote <owner/repo>              Add origin after git init',
+        '',
+        'commit options (plus any git commit flags):',
+        '  -m <message>                       Commit message (required by git)',
+        '  --all                              Stage everything before committing',
+        '',
+        'clone options (plus any git clone flags):',
+        '  --depth <n>, --branch <name>       Forwarded to git clone',
+        '',
+        'read options:',
+        '  -r <owner/repo>                    Read from another repository',
+        '',
+        'workflow subcommands:',
+        '  list                               Workflows of origin repo (id, name, state)',
+        '  runs [branch...]                   Recent workflow runs with status',
+        '  watch [interval]                   Poll origin workflow runs every N seconds',
+        '  read <file> [ref]                  Print a workflow file (.github/workflows/*)',
         '',
         'create options:',
         '  --private                          Create a private repo (default public)',
@@ -420,6 +445,427 @@ function cmdApi(rest) {
     return r.code;
 }
 
+function requireOrigin() {
+    const origin = originOwnerRepo();
+    if (!origin) {
+        return null;
+    }
+    return origin;
+}
+
+function apiFail(prefix, r) {
+    let msg = '';
+    try {
+        msg = (JSON.parse(r.stdout.trim()) || {}).message || '';
+    } catch (e) {
+        msg = (r.stdout || '').trim().split('\n')[0];
+    }
+    return die(prefix + ': ' + (msg || 'GitHub API error'));
+}
+
+function resolveRepoArg(arg) {
+    if (/^https:\/\//.test(arg) || /^git@/.test(arg)) {
+        const parsed = parseOriginUrl(arg);
+        if (!parsed) {
+            return null;
+        }
+        return parsed.owner + '/' + parsed.repo;
+    }
+    if (/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(arg)) {
+        return arg;
+    }
+    return null;
+}
+
+function contentsCall(owner, repo, filePath, ref) {
+    const enc = String(filePath)
+        .split('/')
+        .map(function (p) {
+            return encodeURIComponent(p);
+        })
+        .join('/');
+    let urlPath = '/repos/' + owner + '/' + repo + '/contents/' + enc;
+    if (ref) {
+        urlPath += '?ref=' + encodeURIComponent(ref);
+    }
+    return apiCall('GET', urlPath);
+}
+
+function printContents(r, decode) {
+    let info;
+    try {
+        info = JSON.parse((r.stdout || '').trim());
+    } catch (e) {
+        return die('read: unexpected API response');
+    }
+    if (info.type === 'file') {
+        if (info.encoding === 'base64') {
+            const buf = Buffer.from(
+                String(info.content || '').replace(/\s+/g, ''),
+                'base64'
+            );
+            process.stdout.write(buf.toString('utf8'));
+        } else {
+            process.stdout.write(String(info.content || ''));
+        }
+        return 0;
+    }
+    if (Array.isArray(info)) {
+        info
+            .slice()
+            .sort(function (a, b) {
+                return String(a.type).localeCompare(String(b.type)) ||
+                    String(a.name).localeCompare(String(b.name));
+            })
+            .forEach(function (item) {
+                process.stdout.write(item.type + ' ' + item.path + '\n');
+            });
+        return 0;
+    }
+    process.stdout.write(JSON.stringify(info, null, 2) + '\n');
+    return 0;
+}
+
+function cmdRead(rest) {
+    let remote = null;
+    const args = [];
+    for (let i = 0; i < rest.length; i++) {
+        if (rest[i] === '-r') {
+            i += 1;
+            if (i >= rest.length) {
+                return die('read: -r needs owner/repo');
+            }
+            remote = resolveRepoArg(rest[i]);
+            if (!remote) {
+                return die('read: -r expects owner/repo, got: ' + rest[i]);
+            }
+        } else {
+            args.push(rest[i]);
+        }
+    }
+    if (!args.length || args[0].startsWith('/')) {
+        return die('usage: xgit read <path> [ref] [-r owner/repo]');
+    }
+    let ownerRepo;
+    if (remote) {
+        const o = remote.split('/');
+        ownerRepo = { owner: o[0], repo: o[1] };
+    } else {
+        const origin = requireOrigin();
+        if (!origin) {
+            return die('read: not a github.com git repository (use -r owner/repo)');
+        }
+        ownerRepo = origin;
+    }
+    let ref = null;
+    if (args.length > 1 && !args[1].startsWith('-')) {
+        ref = args[1];
+    }
+    const r = contentsCall(ownerRepo.owner, ownerRepo.repo, args[0], ref);
+    if (r.code !== 0) {
+        return apiFail('read', r);
+    }
+    return printContents(r, true);
+}
+
+function cmdWorkflow(rest) {
+    const sub = rest[0];
+    const args = rest.slice(1);
+    const origin = requireOrigin();
+    if (!origin) {
+        return die('workflow: not a github.com git repository');
+    }
+    const base = '/repos/' + origin.owner + '/' + origin.repo;
+    if (sub === 'list') {
+        const r = apiCall('GET', base + '/actions/workflows');
+        if (r.code !== 0) {
+            return apiFail('workflow list', r);
+        }
+        let info;
+        try {
+            info = JSON.parse(r.stdout.trim());
+        } catch (e) {
+            return die('workflow list: could not parse API response');
+        }
+        (info.workflows || []).forEach(function (w) {
+            process.stdout.write(
+                w.id + '\t' + (w.state || '?') + '\t' + w.path +
+                '\t' + (w.name || '')
+            );
+            process.stdout.write('\n');
+        });
+        return 0;
+    }
+    if (sub === 'runs') {
+        let runsPath = base + '/actions/runs';
+        if (args.length > 0) {
+            const branch = args[0].replace(/[^A-Za-z0-9._/-]/g, '');
+            runsPath += '?branch=' + encodeURIComponent(branch);
+        }
+        const r = apiCall('GET', runsPath);
+        if (r.code !== 0) {
+            return apiFail('workflow runs', r);
+        }
+        let info;
+        try {
+            info = JSON.parse(r.stdout.trim());
+        } catch (e) {
+            return die('workflow runs: could not parse API response');
+        }
+        (info.workflow_runs || []).forEach(function (run) {
+            process.stdout.write(
+                [
+                    run.id,
+                    run.status || '-',
+                    run.conclusion || '-',
+                    run.event || '-',
+                    run.head_branch || '-',
+                    (run.head_sha || '').slice(0, 7),
+                    run.display_title || '',
+                ].join('\t')
+            );
+            process.stdout.write('\n');
+        });
+        return 0;
+    }
+    if (sub === 'watch') {
+        let interval = 15;
+        if (args.length > 0) {
+            const n = parseInt(args[0], 10);
+            if (!isNaN(n) && n >= 2 && n <= 300) {
+                interval = n;
+            }
+        }
+        process.stdout.write(
+            'xgit: watching ' + origin.owner + '/' + origin.repo +
+            ' workflow runs every ' + interval + 's (Ctrl-C to quit)\n'
+        );
+        for (;;) {
+            const r = apiCall('GET', base + '/actions/runs?per_page=5');
+            if (r.code !== 0) {
+                return apiFail('workflow watch', r);
+            }
+            let info;
+            try {
+                info = JSON.parse(r.stdout.trim());
+            } catch (e) {
+                return die('workflow watch: could not parse API response');
+            }
+            const lines = [];
+            (info.workflow_runs || []).forEach(function (run) {
+                lines.push(
+                    run.id + '\t' + (run.status || '-') + '\t' + (run.conclusion || '-') +
+                    '\t' + (run.display_title || '')
+                );
+            });
+            process.stdout.write('\n### ' + new Date().toISOString() + '\n' + lines.join('\n') + '\n');
+            if ((info.workflow_runs || []).every(function (run) {
+                return run.status === 'completed';
+            })) {
+                process.stdout.write('xgit: all recent runs finished\n');
+                return 0;
+            }
+            spawnSync('sleep', [String(interval)]);
+        }
+    }
+    if (sub === 'read') {
+        if (!args.length) {
+            return die('usage: xgit workflow read <file.yml> [ref]');
+        }
+        let ref = null;
+        let file = args[0];
+        if (args.length > 1 && !args[1].startsWith('-')) {
+            ref = args[1];
+        }
+        if (!file.startsWith('.github')) {
+            file = '.github/workflows/' + file;
+        }
+        const r = contentsCall(origin.owner, origin.repo, file, ref);
+        if (r.code !== 0) {
+            return apiFail('workflow read', r);
+        }
+        return printContents(r, true);
+    }
+    return die('workflow: unknown subcommand: ' + (sub || '') + ' (list|runs|watch|read)');
+}
+
+function cmdInit(rest) {
+    let dir = '.';
+    let remote = null;
+    for (let i = 0; i < rest.length; i++) {
+        const a = rest[i];
+        if (a === '--remote' || a === '-r') {
+            i += 1;
+            if (i >= rest.length || rest[i].startsWith('-')) {
+                return die('init: --remote needs owner/repo');
+            }
+            remote = resolveRepoArg(rest[i]);
+            if (!remote) {
+                return die('init: --remote expects owner/repo, got: ' + rest[i]);
+            }
+        } else if (a.startsWith('-')) {
+            return die('init: unknown option: ' + a);
+        } else {
+            dir = a;
+        }
+    }
+    if (sh('git', ['-C', dir, 'rev-parse', '--git-dir']).code === 0) {
+        return die('init: already a git repository: ' + dir);
+    }
+    const init = sh('git', ['init', dir]);
+    if (init.code !== 0) {
+        process.stderr.write(init.stderr);
+        return die('init: git init failed');
+    }
+    process.stdout.write('initialized : ' + dir + '\n');
+    if (remote) {
+        const o = remote.split('/');
+        const url = 'https://github.com/' + remote + '.git';
+        const add = sh('git', ['-C', dir, 'remote', 'add', 'origin', url]);
+        if (add.code !== 0) {
+            process.stderr.write(add.stderr);
+            return die('init: could not add origin');
+        }
+        process.stdout.write('origin      : ' + url + '\n');
+        process.stdout.write(
+            'next        : git add ...; xgit commit -m "init"; xgit push -u origin ' +
+            path.basename(gitHead(dir)) + '\n'
+        );
+    }
+    return 0;
+}
+
+function gitHead(dir) {
+    const r = sh('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD']);
+    const out = (r.stdout || '').trim();
+    return r.code === 0 && out && out !== 'HEAD' ? out : 'master';
+}
+
+function gitIdentityFallback(dir) {
+    if (sh('git', ['-C', dir, 'config', 'user.email']).code === 0) {
+        return;
+    }
+    const r = apiCall('GET', '/user');
+    let login = 'unknown';
+    try {
+        login = (JSON.parse((r.stdout || '').trim()).login) || login;
+    } catch (e) {}
+    if (r.code !== 0) {
+        return;
+    }
+    const set = function (gitArgs) {
+        sh('git', gitArgs, { cwd: dir });
+    };
+    set(['config', 'user.name', login]);
+    set(['config', 'user.email', login + '@users.noreply.github.com']);
+    process.stderr.write('xgit: using fallback identity ' + login + '\n');
+}
+
+function cmdAdd(rest) {
+    const args = rest.length ? rest.slice() : ['-A'];
+    const p = spawnSync('git', ['add'].concat(args), {
+        encoding: 'utf8',
+        stdio: 'inherit',
+    });
+    return p.status == null ? 1 : p.status;
+}
+
+function cmdCommit(rest) {
+    if (!rest.length) {
+        return die('commit: git commit needs arguments (e.g. -m "message")');
+    }
+    gitIdentityFallback(process.cwd());
+    const args = rest.slice();
+    let addAll = false;
+    const passthrough = [];
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] === '--all') {
+            addAll = true;
+        } else {
+            passthrough.push(args[i]);
+        }
+    }
+    if (addAll) {
+        const a = sh('git', ['add', '-A']);
+        if (a.code !== 0) {
+            process.stderr.write(a.stderr);
+            return die('commit: git add failed');
+        }
+    }
+    const p = spawnSync('git', ['commit'].concat(passthrough), {
+        encoding: 'utf8',
+        stdio: 'inherit',
+    });
+    if (p.status != null && p.status !== 0) {
+        return p.status;
+    }
+    return 0;
+}
+
+function cmdClone(rest) {
+    if (!rest.length) {
+        return die('usage: xgit clone <owner/repo|https url> [dir] [--depth <n>] [--branch <name>]');
+    }
+    const full = resolveRepoArg(rest.shift());
+    if (!full) {
+        return die('clone: expected owner/repo or https url, got: ' + full);
+    }
+    const url = 'https://github.com/' + full + '.git';
+    let dirArg = null;
+    const passthrough = [];
+    for (let i = 0; i < rest.length; i++) {
+        const a = rest[i];
+        if (a === '--') {
+            passthrough.push(a);
+        } else if (a.startsWith('-')) {
+            if (dirsPassthroughFlag(a)) {
+                i += 1;
+                if (i >= rest.length) {
+                    return die('clone: ' + a + ' needs a value');
+                }
+                passthrough.push(a, rest[i]);
+            } else {
+                passthrough.push(a);
+            }
+        } else if (dirArg === null) {
+            dirArg = a;
+        } else {
+            return die('clone: unexpected argument: ' + a);
+        }
+    }
+    const finalDir = dirArg || path.basename(full);
+    if (fs.existsSync(finalDir)) {
+        return die('clone: directory already exists: ' + finalDir);
+    }
+    const p = spawnSync('git', ['clone', url].concat(passthrough, [finalDir]), {
+        encoding: 'utf8',
+        stdio: ['ignore', 'inherit', 'inherit'],
+    });
+    if (p.status != null && p.status !== 0) {
+        return p.status;
+    }
+    process.stdout.write('cloned : ' + url + ' -> ' + finalDir + '\n');
+    const origin = { owner: full.split('/')[0], repo: full.split('/')[1] };
+    const r = apiCall('GET', '/repos/' + origin.owner + '/' + origin.repo);
+    if (r.code === 0) {
+        let info;
+        try {
+            info = JSON.parse(r.stdout.trim());
+        } catch (e) {
+            info = null;
+        }
+        if (info && info.default_branch) {
+            process.stdout.write('branch : ' + info.default_branch + '\n');
+        }
+    }
+    process.stdout.write('next   : cd ' + finalDir + '; xgit status\n');
+    return 0;
+}
+
+function dirsPassthroughFlag(flag) {
+    return flag === '--depth' || flag === '--branch' || flag === '--template' || flag === '--separate-git-dir' || flag === '-o' || flag === '-b' || flag === '--origin' || flag === '--name';
+}
+
 function main(argv) {
     if (!argv.length || argv[0] === 'help' || argv[0] === '--help' || argv[0] === '-h') {
         console.log(usage());
@@ -434,6 +880,18 @@ function main(argv) {
             return cmdToken();
         case 'status':
             return cmdStatus();
+        case 'init':
+            return cmdInit(argv.slice(1));
+        case 'add':
+            return cmdAdd(argv.slice(1));
+        case 'commit':
+            return cmdCommit(argv.slice(1));
+        case 'clone':
+            return cmdClone(argv.slice(1));
+        case 'read':
+            return cmdRead(argv.slice(1));
+        case 'workflow':
+            return cmdWorkflow(argv.slice(1));
         case 'create':
             return cmdCreate(argv.slice(1));
         case 'rename':

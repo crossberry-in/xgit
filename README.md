@@ -1,17 +1,51 @@
 # xgit
 
-A Noxs package (nodejs) that gives you full GitHub access from the command line:
-repo creation and renaming, authenticated pushes, and a raw REST-API wrapper
-driven by curl.
+A Noxs package (nodejs) that gives you full GitHub access from the command
+line: a git workflow (init/add/commit/clone/push), repo creation and renaming,
+repo file reads, Actions visibility, and a raw REST-API wrapper driven by
+curl.
 
 ## Commands
 
     xgit token                          Verify the stored GitHub token
     xgit status                         Token + current repo/remote health
+    xgit init [dir] [--remote o/r]      git init; attach GitHub origin
+    xgit add [paths...]                 git add (default: everything)
+    xgit commit [--all] -m <msg>        git commit with identity fallback
+    xgit clone <o/r|url> [dir]          git clone (owner/repo shorthand)
+    xgit push [git-push-options...]     Thin authenticated wrapper around git push
+    xgit read <path> [ref] [-r o/r]     Read a file (or list a dir) from GitHub
+    xgit workflow list|runs|watch|read  GitHub Actions visibility
     xgit create <name> [options]        Create a GitHub repo; optional Noxs scaffold + push
     xgit rename <new-name>              Rename origin repo and fix the local remote
-    xgit push [git-push-options...]     Thin authenticated wrapper around git push
     xgit api [METHOD] <path> [-d json]  Raw GitHub REST call (curl); HTTP status on stderr
+
+### init / add / commit / clone
+
+    xgit init . --remote crossberry-in/mypkg
+    xgit add src/
+    xgit commit --all -m "first"
+    xgit clone crossberry-in/xgit --depth 1
+
+`commit` falls back to the `gh`-authenticated identity (login +
+users.noreply.github.com) when no git identity is configured.
+
+### read
+
+    xgit read README.md
+    xgit read src                  # directories are listed
+    xgit read LICENSE v1.0.1       # read at a tag/branch/commit
+    xgit read -r torvalds/linux init/main.c   # any repo you can access
+
+Files are decoded from the contents API (base64) and printed raw.
+
+### workflow
+
+    xgit workflow list             # workflows: id, state, path, name
+    xgit workflow runs             # recent runs: id, status, conclusion, event, branch, sha, title
+    xgit workflow runs master      # filter by branch
+    xgit workflow watch            # poll until the 5 most recent runs finish
+    xgit workflow read pkg.yml     # print .github/workflows/pkg.yml
 
 ### create
 
@@ -57,7 +91,7 @@ stderr. The subcommand exits non-zero on HTTP 4xx/5xx via curl
 
 or pinned:
 
-    nx install xgit@1.0.1
+    nx install xgit@1.0.2
 
 ## Files
 
