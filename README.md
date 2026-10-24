@@ -1,9 +1,10 @@
 # xgit
 
 A Noxs package (nodejs) that gives you full GitHub access from the command
-line: a git workflow (init/add/commit/clone/push), repo creation and renaming,
-repo file reads, Actions visibility, and a raw REST-API wrapper driven by
-curl.
+line, on top of the `2026-03-10` REST API: a git workflow
+(init/add/commit/clone/push), issues, pull requests, releases with asset
+upload, gists, branches, Actions visibility, repo search, and a raw REST-API
+wrapper driven by curl.
 
 ## Commands
 
@@ -16,6 +17,14 @@ curl.
     xgit push [git-push-options...]     Thin authenticated wrapper around git push
     xgit read <path> [ref] [-r o/r]     Read a file (or list a dir) from GitHub
     xgit workflow list|runs|watch|read  GitHub Actions visibility
+    xgit issue list|view|create|close|comment   Issues (-r owner/repo supported)
+    xgit pull list|view|create|merge    Pull requests
+    xgit release list|view|create|asset Releases (asset upload via uploads.github.com)
+    xgit gist list|view|create|delete   Gists (delete is permanent)
+    xgit branch list|create|delete      Branches via the Git refs API
+    xgit search repos|issues|code|users <query>   Code + repo search
+    xgit rate                           API rate-limit status
+    xgit repo star|unstar|fork <o/r>    Stars and forks
     xgit create <name> [options]        Create a GitHub repo; optional Noxs scaffold + push
     xgit rename <new-name>              Rename origin repo and fix the local remote
     xgit api [METHOD] <path> [-d json]  Raw GitHub REST call (curl); HTTP status on stderr
@@ -47,6 +56,23 @@ Files are decoded from the contents API (base64) and printed raw.
     xgit workflow watch            # poll until the 5 most recent runs finish
     xgit workflow read pkg.yml     # print .github/workflows/pkg.yml
 
+### issue / pull / release / gist / branch
+
+    xgit issue list --limit 5
+    xgit issue create -t "Bug" -b "Steps to reproduce..." -r my-org/myrepo
+    xgit issue close 12
+    xgit pull list
+    xgit pull create --head feature --base master -t "Add x"
+    xgit pull merge 42 --squash
+    xgit release list
+    xgit release create v2.0.0 -t "2.0" -n "Release notes"
+    xgit release asset v2.0.0 dist/mypkg.tar.xz -l "linux binary"
+    xgit gist create notes.txt -d "meeting notes" --public
+    xgit branch create hotfix-x --from master
+    xgit branch delete xgit-smoke-13
+
+Issue bodies (`-b`), PR bodies and release notes accept multi-line text.
+
 ### create
 
     xgit create mypkg --node --private --push
@@ -70,6 +96,7 @@ stderr. The subcommand exits non-zero on HTTP 4xx/5xx via curl
 ## Auth and token handling
 
 - Token source: `GH_TOKEN` / `GITHUB_TOKEN` environment variables, else `gh auth token`.
+- API calls pin `X-GitHub-Api-Version: 2026-03-10`.
 - The token is never printed, logged, or passed on the command line.
 - API calls pass the token through a temporary header file inside a `0700`
   temp directory with `0600` permissions, deleted after every call.
@@ -91,7 +118,7 @@ stderr. The subcommand exits non-zero on HTTP 4xx/5xx via curl
 
 or pinned:
 
-    nx install xgit@1.0.2
+    nx install xgit@1.0.3
 
 ## Files
 

@@ -1,6 +1,6 @@
 {
   "name": "xgit",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "description": "GitHub full-access helper: create/rename repos, push, raw REST API via curl",
   "bin": {

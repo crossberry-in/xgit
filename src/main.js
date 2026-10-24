@@ -6,8 +6,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const VERSION = '1.0.2';
+const VERSION = '1.0.3';
 const API = 'https://api.github.com';
+const API_VERSION = '2026-03-10';
 
 function usage() {
     return [
@@ -25,6 +26,14 @@ function usage() {
         '  push [git-push-options...]         Thin authenticated wrapper around git push',
         '  read <path> [ref] [options]        Read a file (or list a dir) from GitHub',
         '  workflow <sub> [args]              List, read or follow GitHub Actions',
+        '  issue <sub> [args]                 List, view, create, close, comment',
+        '  pull <sub> [args]                  List, view, create, merge',
+        '  release <sub> [args]               List, view, create, upload assets',
+        '  gist <sub> [args]                  List, view, create, delete',
+        '  branch <sub> [args]                List, create, delete branches (Git refs API)',
+        '  search <type> <query>              Search repos, issues (incl. PRs) or code',
+        '  rate                               Show current API rate limit',
+        '  repo <sub> [args]                  star | unstar | fork <owner/repo>',
         '  create <name> [options]            Create a GitHub repo; scaffold a Noxs package',
         '  rename <new-name>                  Rename origin repo and fix the local remote',
         '  api [METHOD] <path> [-d <json>]    Raw GitHub REST call (curl), HTTP status on stderr',
@@ -43,10 +52,42 @@ function usage() {
         '  -r <owner/repo>                    Read from another repository',
         '',
         'workflow subcommands:',
-        '  list                               Workflows of origin repo (id, name, state)',
+        '  list                               Workflows of origin repo (id, state, path)',
         '  runs [branch...]                   Recent workflow runs with status',
         '  watch [interval]                   Poll origin workflow runs every N seconds',
         '  read <file> [ref]                  Print a workflow file (.github/workflows/*)',
+        '',
+        'issue subcommands (all accept -r owner/repo):',
+        '  list [--closed|--all] [--limit n]  Issues (number, state, title)',
+        '  view <number>                      Title, state, author, body',
+        '  create -t <title> [-b <body>]      Open an issue; prints the HTML url',
+        '  close <number>                     Close an issue',
+        '  comment <number> -m <text>         Comment on an issue or pull request',
+        '',
+        'pull subcommands:',
+        '  list [--limit n]                   Pull requests (number, state, branches)',
+        '  view <number>                      Title, state, head -> base',
+        '  create --head <b> --base <b> -t <title> [-b body] [--draft]',
+        '  merge <number> [--squash|--rebase] Merge an open pull request',
+        '',
+        'release subcommands:',
+        '  list                               Releases (tag, name, assets)',
+        '  view <tag>                         Release details with asset urls',
+        '  create <tag> [-t <name>] [-n <notes>] [--target <branch>]',
+        '  asset <tag> <file> [-l <label>]    Upload an asset to an existing release',
+        '',
+        'gist subcommands:',
+        '  list [--public] [-l <n>]           Your gists (or public ones)',
+        '  view <id>                          Print each file in the gist',
+        '  create <file...|-> [-d <text>] [--public]   (use - to read stdin)',
+        '  delete <id>                        Permanently delete a gist',
+        '',
+        'branch subcommands:',
+        '  list                               Branches of origin repo',
+        '  create <name> [--from <ref>]       Create a branch (default from default branch)',
+        '  delete <name>                      Delete refs/heads/<name>',
+        '',
+        'search types: repos | issues | code | users',
         '',
         'create options:',
         '  --private                          Create a private repo (default public)',
@@ -111,7 +152,7 @@ function newHeaderFile() {
         [
             'Authorization: Bearer ' + authToken(),
             'Accept: application/vnd.github+json',
-            'X-GitHub-Api-Version: 2022-11-28',
+            'X-GitHub-Api-Version: ' + API_VERSION,
         ].join('\n') + '\n'
     );
     fs.chmodSync(file, 0o600);
@@ -866,6 +907,724 @@ function dirsPassthroughFlag(flag) {
     return flag === '--depth' || flag === '--branch' || flag === '--template' || flag === '--separate-git-dir' || flag === '-o' || flag === '-b' || flag === '--origin' || flag === '--name';
 }
 
+function extractRemote(args) {
+    const out = [];
+    let remote = null;
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] === '-r') {
+            i += 1;
+            if (i >= args.length) {
+                return null;
+            }
+            remote = resolveRepoArg(args[i]);
+            if (!remote) {
+                return null;
+            }
+        } else {
+            out.push(args[i]);
+        }
+    }
+    return { remote: remote, args: out };
+}
+
+function resolveRepoPair(remote, label) {
+    if (remote) {
+        const parts = remote.split('/');
+        return { owner: parts[0], repo: parts[1] };
+    }
+    const origin = originOwnerRepo();
+    if (!origin) {
+        die(label + ': not a github.com git repository (use -r owner/repo)');
+        return null;
+    }
+    return origin;
+}
+
+function parseLimit(args, defaultValue) {
+    let limit = defaultValue;
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] === '--limit' || args[i] === '-l') {
+            const n = parseInt(args[i + 1], 10);
+            if (!isNaN(n) && n > 0) {
+                limit = n;
+                args.splice(i, 2);
+                i -= 1;
+            }
+        }
+    }
+    return limit;
+}
+
+function collectFlagValue(args, names) {
+    for (let i = 0; i < args.length; i++) {
+        if (names.indexOf(args[i]) !== -1) {
+            const value = args[i + 1];
+            if (i + 1 < args.length) {
+                args.splice(i, 2);
+                return value;
+            }
+            args.splice(i, 1);
+            return null;
+        }
+    }
+    return null;
+}
+
+function hasFlag(args, names) {
+    for (let i = 0; i < args.length; i++) {
+        if (names.indexOf(args[i]) !== -1) {
+            args.splice(i, 1);
+            return true;
+        }
+    }
+    return false;
+}
+
+function truncLine(text, max) {
+    text = String(text || '').split('\n')[0] || '';
+    return text.length > max ? text.slice(0, max - 1) + '\u2026' : text;
+}
+
+function brief(key, item) {
+    try {
+        return JSON.parse((item || '').trim())[key];
+    } catch (e) {
+        return null;
+    }
+}
+
+function cmdIssue(rest) {
+    const parsed = extractRemote(rest.slice());
+    if (!parsed) {
+        return die('issue: -r expects owner/repo');
+    }
+    const pair = resolveRepoPair(parsed.remote, 'issue');
+    if (!pair) {
+        return 1;
+    }
+    const args = parsed.args.slice();
+    const sub = args.shift();
+    const base = '/repos/' + pair.owner + '/' + pair.repo + '/issues';
+    if (!sub || sub === 'list') {
+        const limit = parseLimit(args, 20);
+        const state = hasFlag(args, ['--all']) ? 'all' :
+            hasFlag(args, ['--closed']) ? 'closed' : 'open';
+        const r = apiCall('GET', base + '?state=' + state + '&per_page=50');
+        if (r.code !== 0) {
+            return apiFail('issue list', r);
+        }
+        let info;
+        try {
+            info = JSON.parse(r.stdout.trim());
+        } catch (e) {
+            return die('issue list: could not parse API response');
+        }
+        info.filter(function (i) { return !i.pull_request; })
+            .slice(0, limit)
+            .forEach(function (i) {
+                process.stdout.write([
+                    '#' + i.number, i.state, i.user.login,
+                    '"' + truncLine(i.title, 70) + '"',
+                ].join('\t') + '\n');
+            });
+        return 0;
+    }
+    if (sub === 'view') {
+        if (!args.length || !/^\d+$/.test(args[0])) {
+            return die('usage: xgit issue view <number>');
+        }
+        const r = apiCall('GET', base + '/' + args[0]);
+        if (r.code !== 0) {
+            return apiFail('issue view', r);
+        }
+        let info;
+        try {
+            info = JSON.parse(r.stdout.trim());
+        } catch (e) {
+            return die('issue view: could not parse API response');
+        }
+        process.stdout.write(
+            '#' + info.number + ' ' + info.state + ' ' +
+            (info.closed_at || '') + '\n' +
+            'title : ' + info.title + '\n' +
+            'by    : ' + info.user.login + '\n' +
+            'url   : ' + info.html_url + '\n' +
+            String(info.body || '').replace(/\s+$/, '') + '\n'
+        );
+        return 0;
+    }
+    if (sub === 'create') {
+        const title = collectFlagValue(args, ['-t', '--title']);
+        const body = collectFlagValue(args, ['-b', '--body']);
+        if (!title) {
+            return die('usage: xgit issue create -t <title> [-b <body>]');
+        }
+        const payload = { title: title, body: body || null };
+        const r = apiCall('POST', base, JSON.stringify(payload));
+        if (r.code !== 0) {
+            return apiFail('issue create', r);
+        }
+        const url = brief('html_url', r.stdout);
+        process.stdout.write('issue created: ' + url + '\n');
+        return 0;
+    }
+    if (sub === 'close') {
+        if (!args.length || !/^\d+$/.test(args[0])) {
+            return die('usage: xgit issue close <number>');
+        }
+        const r = apiCall(
+            'PATCH', base + '/' + args[0],
+            JSON.stringify({ state: 'closed' })
+        );
+        if (r.code !== 0) {
+            return apiFail('issue close', r);
+        }
+        process.stdout.write('#' + args[0] + ' closed\n');
+        return 0;
+    }
+    if (sub === 'comment') {
+        if (!args.length || !/^\d+$/.test(args[0])) {
+            return die('usage: xgit issue comment <number> -m <text>');
+        }
+        const num = args.shift();
+        const text = collectFlagValue(args, ['-m', '--message']);
+        if (!text) {
+            return die('issue comment: -m <text> is required');
+        }
+        const r = apiCall(
+            'POST', base + '/' + num + '/comments',
+            JSON.stringify({ body: text })
+        );
+        if (r.code !== 0) {
+            return apiFail('issue comment', r);
+        }
+        process.stdout.write('comment added to #' + num + ': ' + brief('html_url', r.stdout) + '\n');
+        return 0;
+    }
+    return die('issue: unknown subcommand: ' + sub + ' (list|view|create|close|comment)');
+}
+
+function cmdPull(rest) {
+    const parsed = extractRemote(rest.slice());
+    if (!parsed) {
+        return die('pull: -r expects owner/repo');
+    }
+    const pair = resolveRepoPair(parsed.remote, 'pull');
+    if (!pair) {
+        return 1;
+    }
+    const args = parsed.args.slice();
+    const sub = args.shift();
+    const base = '/repos/' + pair.owner + '/' + pair.repo + '/pulls';
+    if (!sub || sub === 'list') {
+        const limit = parseLimit(args, 20);
+        const r = apiCall('GET', base + '?state=open&per_page=50');
+        if (r.code !== 0) {
+            return apiFail('pull list', r);
+        }
+        let info;
+        try {
+            info = JSON.parse(r.stdout.trim());
+        } catch (e) {
+            return die('pull list: could not parse API response');
+        }
+        info.slice(0, limit).forEach(function (p) {
+            process.stdout.write([
+                '#' + p.number, p.state,
+                p.head.ref + ' -> ' + p.base.ref,
+                '"' + truncLine(p.title, 60) + '"',
+            ].join('\t') + '\n');
+        });
+        return 0;
+    }
+    if (sub === 'view') {
+        if (!args.length || !/^\d+$/.test(args[0])) {
+            return die('usage: xgit pull view <number>');
+        }
+        const r = apiCall('GET', base + '/' + args[0]);
+        if (r.code !== 0) {
+            return apiFail('pull view', r);
+        }
+        let info;
+        try {
+            info = JSON.parse(r.stdout.trim());
+        } catch (e) {
+            return die('pull view: could not parse API response');
+        }
+        process.stdout.write(
+            '#' + info.number + ' ' + info.state + '\n' +
+            'title: ' + info.title + '\n' +
+            'head : ' + info.head.ref + ' (' + info.head.repo.full_name + ')\n' +
+            'base : ' + info.base.ref + '\n' +
+            'url  : ' + info.html_url + '\n' +
+            String((info.body || '')).replace(/\s+$/, '') + '\n'
+        );
+        return 0;
+    }
+    if (sub === 'create') {
+        const head = collectFlagValue(args, ['--head']);
+        const baseRef = collectFlagValue(args, ['--base']);
+        const title = collectFlagValue(args, ['-t', '--title']);
+        const body = collectFlagValue(args, ['-b', '--body']);
+        const draft = hasFlag(args, ['--draft']);
+        if (!head || !baseRef || !title) {
+            return die('usage: xgit pull create --head <branch> --base <branch> -t <title> [-b <body>] [--draft]');
+        }
+        const payload = {
+            title: title,
+            head: head,
+            base: baseRef,
+            body: body || null,
+            draft: draft,
+        };
+        const r = apiCall('POST', base, JSON.stringify(payload));
+        if (r.code !== 0) {
+            return apiFail('pull create', r);
+        }
+        process.stdout.write('pull request opened: ' + brief('html_url', r.stdout) + '\n');
+        return 0;
+    }
+    if (sub === 'merge') {
+        if (!args.length || !/^\d+$/.test(args[0])) {
+            return die('usage: xgit pull merge <number> [--squash|--rebase]');
+        }
+        const num = args.shift();
+        let method = 'merge';
+        if (hasFlag(args, ['--squash'])) {
+            method = 'squash';
+        } else if (hasFlag(args, ['--rebase'])) {
+            method = 'rebase';
+        }
+        const r = apiCall(
+            'PUT', base + '/' + num + '/merge',
+            JSON.stringify({ merge_method: method })
+        );
+        if (r.code !== 0) {
+            return apiFail('pull merge', r);
+        }
+        process.stdout.write(brief('message', r.stdout) + '\n');
+        return 0;
+    }
+    return die('pull: unknown subcommand: ' + sub + ' (list|view|create|merge)');
+}
+
+function assetUploadCall(url, filePath, label) {
+    return withHeaderFile(function (headerFile) {
+        const name = path.basename(filePath);
+        const args = [
+            '-sS',
+            '--fail-with-body',
+            '--max-time', '300',
+            '-X', 'POST',
+            '-H', '@' + headerFile,
+            '-H', 'Content-Type: application/octet-stream',
+            '--data-binary', '@' + filePath,
+        ];
+        args.push(String(url).replace(/\{\?[^}]*\}/, '') +
+            '?name=' + encodeURIComponent(name) +
+            (label ? '&label=' + encodeURIComponent(label) : ''));
+        args.push('-w', '\n%{stderr}[xgit] HTTP %{http_code}\n');
+        return sh('curl', args);
+    });
+}
+
+function cmdRelease(rest) {
+    const parsed = extractRemote(rest.slice());
+    if (!parsed) {
+        return die('release: -r expects owner/repo');
+    }
+    const pair = resolveRepoPair(parsed.remote, 'release');
+    if (!pair) {
+        return 1;
+    }
+    const args = parsed.args.slice();
+    const sub = args.shift();
+    const base = '/repos/' + pair.owner + '/' + pair.repo + '/releases';
+    if (!sub || sub === 'list') {
+        const limit = parseLimit(args, 20);
+        const r = apiCall('GET', base);
+        if (r.code !== 0) {
+            return apiFail('release list', r);
+        }
+        let info;
+        try {
+            info = JSON.parse(r.stdout.trim());
+        } catch (e) {
+            return die('release list: could not parse API response');
+        }
+        info.slice(0, limit).forEach(function (rel) {
+            process.stdout.write([
+                rel.tag_name,
+                '"' + (rel.name || '') + '"',
+                (rel.assets || []).length + ' asset(s)',
+                rel.draft ? 'draft' : rel.prerelease ? 'pre' : 'stable',
+            ].join('\t') + '\n');
+        });
+        return 0;
+    }
+    if (sub === 'view') {
+        if (!args.length) {
+            return die('usage: xgit release view <tag>');
+        }
+        const r = apiCall('GET', base + '/tags/' + encodeURIComponent(args[0]));
+        if (r.code !== 0) {
+            return apiFail('release view', r);
+        }
+        let info;
+        try {
+            info = JSON.parse(r.stdout.trim());
+        } catch (e) {
+            return die('release view: could not parse API response');
+        }
+        process.stdout.write(
+            'tag  : ' + info.tag_name + ' (' + info.name + ')\n' +
+            'url  : ' + info.html_url + '\n' +
+            'body : ' + truncLine((info.body || '').replace(/\s+$/, ''), 100) + '\n' +
+            'assets:\n'
+        );
+        (info.assets || []).forEach(function (a) {
+            process.stdout.write('  ' + a.name + '  ' + a.size + 'B\n  ' + a.browser_download_url + '\n');
+        });
+        return 0;
+    }
+    if (sub === 'create') {
+        const tag = args.shift();
+        const name = collectFlagValue(args, ['-t', '--title']);
+        const notes = collectFlagValue(args, ['-n', '--notes']);
+        const target = collectFlagValue(args, ['--target']);
+        if (!tag || tag.indexOf('/') !== -1) {
+            return die('usage: xgit release create <tag> [-t <name>] [-n <notes>] [--target <branch>]');
+        }
+        const payload = { tag_name: tag };
+        if (name) {
+            payload.name = name;
+        }
+        if (notes) {
+            payload.body = notes;
+        }
+        if (target) {
+            payload.target_commitish = target;
+        }
+        const r = apiCall('POST', base, JSON.stringify(payload));
+        if (r.code !== 0) {
+            return apiFail('release create', r);
+        }
+        process.stdout.write('release created: ' + brief('html_url', r.stdout) + '\n');
+        return 0;
+    }
+    if (sub === 'asset') {
+        const tag = args.shift();
+        const file = args.shift();
+        const label = collectFlagValue(args, ['-l', '--label']);
+        if (!tag || !file) {
+            return die('usage: xgit release asset <tag> <file> [-l <label>]');
+        }
+        const pre = apiCall('GET', base + '/tags/' + encodeURIComponent(tag));
+        if (pre.code !== 0) {
+            return apiFail('release asset', pre);
+        }
+        let rel;
+        try {
+            rel = JSON.parse(pre.stdout.trim());
+        } catch (e) {
+            return die('release asset: could not parse API response');
+        }
+        if (!rel.upload_url) {
+            return die('release asset: no upload endpoint for ' + tag);
+        }
+        const exists = (rel.assets || []).some(function (a) { return a.name === path.basename(file); });
+        if (exists) {
+            return die('release asset: ' + path.basename(file) + ' already exists on ' + tag);
+        }
+        const up = assetUploadCall(rel.upload_url, file, label);
+        if (up.code !== 0) {
+            return apiFail('release asset', up);
+        }
+        process.stdout.write('asset uploaded: ' + path.basename(file) + ' -> ' + brief('browser_download_url', up.stdout) + '\n');
+        return 0;
+    }
+    return die('release: unknown subcommand: ' + sub + ' (list|view|create|asset)');
+}
+
+function cmdGist(rest) {
+    const args = rest.slice();
+    const sub = args.shift();
+    if (!sub || sub === 'list') {
+        const isPublic = hasFlag(args, ['--public']);
+        const limit = parseLimit(args, 20);
+        let pathUrl = '/gists';
+        if (isPublic) {
+            pathUrl += '?public=true';
+        }
+        const r = apiCall('GET', pathUrl);
+        if (r.code !== 0) {
+            return apiFail('gist list', r);
+        }
+        let info;
+        try {
+            info = JSON.parse(r.stdout.trim());
+        } catch (e) {
+            return die('gist list: could not parse API response');
+        }
+        info.slice(0, limit).forEach(function (g) {
+            const files = Object.keys(g.files || {}).join(',');
+            process.stdout.write([
+                g.id, isPublic ? 'public' : (g.public ? 'public' : 'secret'),
+                '"' + truncLine(g.description || files, 60) + '"',
+            ].join('\t') + '\n');
+        });
+        return 0;
+    }
+    if (sub === 'view') {
+        if (!args.length) {
+            return die('usage: xgit gist view <id>');
+        }
+        const r = apiCall('GET', '/gists/' + encodeURIComponent(args[0]));
+        if (r.code !== 0) {
+            return apiFail('gist view', r);
+        }
+        let info;
+        try {
+            info = JSON.parse(r.stdout.trim());
+        } catch (e) {
+            return die('gist view: could not parse API response');
+        }
+        process.stdout.write('gist ' + info.id + ': ' + (info.description || '') + '\n');
+        Object.keys(info.files || {}).forEach(function (fname) {
+            const f = info.files[fname];
+            process.stdout.write(
+                '\n=== ' + fname + ' ===\n' +
+                (f.truncated ? '(content truncated on API)\n' : '') +
+                String(f.content || '')
+            );
+        });
+        return 0;
+    }
+    if (sub === 'create') {
+        const desc = collectFlagValue(args, ['-d', '--description']);
+        const isPublic = hasFlag(args, ['--public']);
+        if (!args.length) {
+            return die('usage: xgit gist create <file...|-> [-d <text>] [--public]');
+        }
+        const files = {};
+        args.forEach(function (src) {
+            let name, content;
+            if (src === '-') {
+                name = args.length > 1 ? 'stdin.txt' : 'gist-content.txt';
+                content = fs.readFileSync(0, 'utf8');
+            } else {
+                name = path.basename(src);
+                content = fs.readFileSync(src, 'utf8');
+            }
+            files[name] = { content: content };
+        });
+        const r = apiCall(
+            'POST', '/gists',
+            JSON.stringify({ description: desc || null, public: !!isPublic, files: files })
+        );
+        if (r.code !== 0) {
+            return apiFail('gist create', r);
+        }
+        process.stdout.write('gist created: ' + brief('html_url', r.stdout) + '\n');
+        return 0;
+    }
+    if (sub === 'delete') {
+        if (!args.length) {
+            return die('usage: xgit gist delete <id>');
+        }
+        const r = apiCall('DELETE', '/gists/' + encodeURIComponent(args[0]));
+        if (r.code !== 0) {
+            return apiFail('gist delete', r);
+        }
+        process.stdout.write('gist deleted: ' + args[0] + '\n');
+        return 0;
+    }
+    return die('gist: unknown subcommand: ' + sub + ' (list|view|create|delete)');
+}
+
+function cmdBranch(rest) {
+    const parsed = extractRemote(rest.slice());
+    if (!parsed) {
+        return die('branch: -r expects owner/repo');
+    }
+    const pair = resolveRepoPair(parsed.remote, 'branch');
+    if (!pair) {
+        return 1;
+    }
+    const args = parsed.args.slice();
+    const sub = args.shift();
+    const base = '/repos/' + pair.owner + '/' + pair.repo;
+    if (sub === 'list') {
+        const limit = parseLimit(args, 30);
+        const r = apiCall('GET', base + '/branches?per_page=100');
+        if (r.code !== 0) {
+            return apiFail('branch list', r);
+        }
+        let info;
+        try {
+            info = JSON.parse(r.stdout.trim());
+        } catch (e) {
+            return die('branch list: could not parse API response');
+        }
+        info.slice(0, limit).forEach(function (b) {
+            process.stdout.write(b.name + '\t' + b.commit.sha.slice(0, 7) + '\n');
+        });
+        return 0;
+    }
+    if (sub === 'create') {
+        const name = args.shift();
+        const from = collectFlagValue(args, ['--from']);
+        if (!name || !/^[A-Za-z0-9._/-]+$/.test(name)) {
+            return die('usage: xgit branch create <name> [--from <ref>]');
+        }
+        if (from && !/^[A-Za-z0-9._/-]+$/.test(from)) {
+            return die('branch create: invalid --from ref: ' + from);
+        }
+        const refUrl = base + '/git/ref/heads/' + encodeURIComponent(from || 'master');
+        const pre = apiCall('GET', refUrl);
+        if (pre.code !== 0) {
+            return apiFail('branch create (--from ref)', pre);
+        }
+        let refInfo;
+        try {
+            refInfo = JSON.parse(pre.stdout.trim());
+        } catch (e) {
+            return die('branch create: could not parse API response');
+        }
+        const sha = refInfo.object && refInfo.object.sha;
+        if (!sha) {
+            return die('branch create: could not resolve source branch sha');
+        }
+        const r = apiCall(
+            'POST', base + '/git/refs',
+            JSON.stringify({ ref: 'refs/heads/' + name, sha: sha })
+        );
+        if (r.code !== 0) {
+            return apiFail('branch create', r);
+        }
+        process.stdout.write('branch created: ' + name + ' (from ' + (from || 'master') + ')\n');
+        return 0;
+    }
+    if (sub === 'delete') {
+        const name = args.shift();
+        if (!name || !/^[A-Za-z0-9._/-]+$/.test(name)) {
+            return die('usage: xgit branch delete <name>');
+        }
+        const r = apiCall('DELETE', base + '/git/refs/heads/' + encodeURIComponent(name));
+        if (r.code !== 0) {
+            return apiFail('branch delete', r);
+        }
+        process.stdout.write('branch deleted: ' + name + '\n');
+        return 0;
+    }
+    return die('branch: unknown subcommand: ' + (sub || '') + ' (list|create|delete)');
+}
+
+function cmdSearch(rest) {
+    const args = rest.slice();
+    const type = args.shift();
+    const query = args.length ? args.join(' ') : null;
+    const types = [
+        'repositories', 'issues', 'code', 'users', 'pull-requests',
+    ];
+    const aliases = {
+        repos: 'repositories',
+        issue: 'issues',
+        pr: 'pull-requests',
+        pull: 'pull-requests',
+    };
+    if (!type || !query) {
+        return die('usage: xgit search <repos|issues|code|users> <query>');
+    }
+    const t = aliases[type] || type;
+    if (types.indexOf(t) === -1) {
+        return die('search: unknown type: ' + type + ' (try repos|issues|code|users)');
+    }
+    const r = apiCall(
+        'GET',
+        '/search/' + t + '?q=' + encodeURIComponent(query) + '&per_page=10'
+    );
+    if (r.code !== 0) {
+        return apiFail('search', r);
+    }
+    let info;
+    try {
+        info = JSON.parse(r.stdout.trim());
+    } catch (e) {
+        return die('search: could not parse API response');
+    }
+    process.stdout.write('total: ' + (info.total_count || (info.items || []).length) + '\n');
+    (info.items || []).slice(0, 10).forEach(function (item) {
+        if (t === 'repositories') {
+            process.stdout.write(item.full_name + '\t\u2605' + (item.stargazers_count || 0) + '\t' + truncLine(item.description || '', 60) + '\n');
+        } else if (t === 'issues') {
+            process.stdout.write((item.repository_url || '').replace(/^.*\/repos\//, '') + '#' + item.number + '\t' + item.state + '\t' + truncLine(item.title || '', 60) + '\n');
+        } else if (t === 'code') {
+            process.stdout.write((item.repository || {}).full_name + ':' + item.path + '\n');
+        } else if (t === 'users') {
+            process.stdout.write(item.login + '\n');
+        } else {
+            process.stdout.write(JSON.stringify(item).slice(0, 140) + '\n');
+        }
+    });
+    return 0;
+}
+
+function cmdRate() {
+    const r = apiCall('GET', '/rate_limit');
+    if (r.code !== 0) {
+        return apiFail('rate', r);
+    }
+    let info;
+    try {
+        info = JSON.parse(r.stdout.trim());
+    } catch (e) {
+        return die('rate: could not parse API response');
+    }
+    const core = (info.resources || {}).core || {};
+    const reset = core.reset ? new Date(core.reset * 1000).toISOString() : '?';
+    process.stdout.write(
+        'core   : ' + (core.remaining ?? '-') + ' / ' + (core.limit ?? '-') + ' (resets ' + reset + ')\n' +
+        'search : ' + (info.resources.search || {}).remaining + ' / ' + (info.resources.search || {}).limit + '\n'
+    );
+    return 0;
+}
+
+function cmdRepo(rest) {
+    const args = rest.slice();
+    const sub = args.shift();
+    if (sub === 'fork') {
+        const full = args[0] && resolveRepoArg(args[0]);
+        if (!full) {
+            return die('usage: xgit repo fork <owner/repo>');
+        }
+        const parts = full.split('/');
+        const r = apiCall('POST', '/repos/' + parts[0] + '/' + parts[1] + '/forks');
+        if (r.code !== 0) {
+            return apiFail('repo fork', r);
+        }
+        process.stdout.write('fork created: ' + brief('full_name', r.stdout) + ' -> ' + brief('html_url', r.stdout) + '\n');
+        return 0;
+    }
+    if (sub === 'star' || sub === 'unstar') {
+        const full = args[0] && resolveRepoArg(args[0]);
+        if (!full) {
+            return die('usage: xgit repo ' + sub + ' <owner/repo>');
+        }
+        const parts = full.split('/');
+        const r = apiCall(
+            sub === 'star' ? 'PUT' : 'DELETE',
+            '/user/starred/' + parts[0] + '/' + parts[1]
+        );
+        if (r.code !== 0) {
+            return apiFail('repo ' + sub, r);
+        }
+        process.stdout.write(sub + ': ' + full + '\n');
+        return 0;
+    }
+    return die('repo: unknown subcommand: ' + (sub || '') + ' (star|unstar|fork)');
+}
+
 function main(argv) {
     if (!argv.length || argv[0] === 'help' || argv[0] === '--help' || argv[0] === '-h') {
         console.log(usage());
@@ -892,6 +1651,22 @@ function main(argv) {
             return cmdRead(argv.slice(1));
         case 'workflow':
             return cmdWorkflow(argv.slice(1));
+        case 'issue':
+            return cmdIssue(argv.slice(1));
+        case 'pull':
+            return cmdPull(argv.slice(1));
+        case 'release':
+            return cmdRelease(argv.slice(1));
+        case 'gist':
+            return cmdGist(argv.slice(1));
+        case 'branch':
+            return cmdBranch(argv.slice(1));
+        case 'search':
+            return cmdSearch(argv.slice(1));
+        case 'rate':
+            return cmdRate();
+        case 'repo':
+            return cmdRepo(argv.slice(1));
         case 'create':
             return cmdCreate(argv.slice(1));
         case 'rename':
