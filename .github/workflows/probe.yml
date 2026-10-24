@@ -11,19 +11,36 @@ jobs:
     steps:
       - run: echo "detect ok"
 
-  build-fromjson:
+  b1-fromjson-no-needs:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson('[{"arch":"universal"}]') }}
+    steps:
+      - run: echo "b1 fromjson-no-needs arch=${{ matrix.arch }}"
+
+  b2-fromjson-needs-nofailfast:
+    needs: detect
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson('[{"arch":"universal"}]') }}
+    steps:
+      - run: echo "b2 fromjson+needs arch=${{ matrix.arch }}"
+
+  b3-literal-needs:
+    needs: detect
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [universal]
+    steps:
+      - run: echo "b3 needs+static arch=${{ matrix.arch }}"
+
+  b4-fromjson-needs-failfast:
     needs: detect
     runs-on: ubuntu-latest
     strategy:
       fail-fast: true
       matrix: ${{ fromJson(needs.detect.outputs.matrix) }}
     steps:
-      - run: echo "fromjson arch=${{ matrix.arch }}"
+      - run: echo "b4 failfast+needs arch=${{ matrix.arch }}"
 
-  build-static:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        arch: [universal]
-    steps:
-      - run: echo "static arch=${{ matrix.arch }}"
