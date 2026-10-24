@@ -92,7 +92,8 @@ jobs:
       LANG_ID: ${{ needs.detect.outputs.language }}
     strategy:
       fail-fast: true
-      matrix: ${{ fromJson(needs.detect.outputs.matrix) }}
+      matrix:
+        include: ${{ fromJson(needs.detect.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 
