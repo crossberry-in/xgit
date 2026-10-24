@@ -1,0 +1,12 @@
+{
+  "name": "a",
+  "description": "Noxs a utility",
+  "latest": "1.0.0",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "tag": "a-v1.0.0",
+      "files": []
+    }
+  ]
+}

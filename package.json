@@ -1,0 +1,11 @@
+{
+  "name": "a",
+  "version": "1.0.0",
+  "private": true,
+  "bin": {
+    "a": "src/main.js"
+  },
+  "scripts": {
+    "start": "node src/main.js"
+  }
+}
