@@ -6,7 +6,12 @@
     {
       "version": "1.0.0",
       "tag": "a-v1.0.0",
-      "files": []
+      "files": [
+        {
+          "name": "a.nx.pkg.1.0.0.universal.tar.xz",
+          "sha256": "fbd7675f10fe5af6cd851e16318a4cc900a6e4ea70e3749bc021326154894a6c"
+        }
+      ]
     }
   ]
 }
