@@ -1,0 +1,29 @@
+name: probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: '[{"arch":"universal"}]'
+    steps:
+      - run: echo "detect ok"
+
+  build-fromjson:
+    needs: detect
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix: ${{ fromJson(needs.detect.outputs.matrix) }}
+    steps:
+      - run: echo "fromjson arch=${{ matrix.arch }}"
+
+  build-static:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [universal]
+    steps:
+      - run: echo "static arch=${{ matrix.arch }}"
